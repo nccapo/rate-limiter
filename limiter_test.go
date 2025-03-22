@@ -1,31 +1,50 @@
 package rrl
 
 import (
-	"context"
-	"github.com/redis/go-redis/v9"
-	"github.com/stretchr/testify/assert"
+	"io"
+	"log"
 	"testing"
 	"time"
+
+	"github.com/alicebob/miniredis/v2"
+	"github.com/redis/go-redis/v9"
+	"github.com/stretchr/testify/assert"
 )
 
-func setupRedisClient() *redis.Client {
+func setupRedisClient(t *testing.T) (*redis.Client, *miniredis.Miniredis) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("Error creating mock Redis server: %v", err)
+	}
+
 	client := redis.NewClient(&redis.Options{
-		Addr: "localhost:6379",
-		DB:   1,
+		Addr: mr.Addr(),
+		DB:   0,
 	})
 
-	client.FlushDB(context.Background()) // Clean the DB before each test
-	return client
+	return client, mr
 }
 
 func TestRateLimiter_Allow(t *testing.T) {
-	client := setupRedisClient()
+	client, mr := setupRedisClient(t)
+	defer mr.Close()
+
+	// Create a logger that discards output during tests
+	testLogger := log.New(io.Discard, "", 0)
+
+	// Create a mutable time reference for testing
+	currentTime := time.Now()
+
 	limiter, err := NewRateLimiter(&RateLimiter{
 		Rate:           1,
 		MaxTokens:      5,
 		RefillInterval: 1 * time.Second,
 		Client:         client,
 		HashKey:        false,
+		logger:         testLogger,
+		timeNow: func() time.Time {
+			return currentTime
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -35,7 +54,7 @@ func TestRateLimiter_Allow(t *testing.T) {
 		name     string
 		key      string
 		expected bool
-		delay    time.Duration
+		advance  time.Duration
 	}{
 		{"First Request", "user1", true, 0},
 		{"Second Request", "user1", true, 0},
@@ -47,8 +66,9 @@ func TestRateLimiter_Allow(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		if tt.delay > 0 {
-			time.Sleep(tt.delay)
+		if tt.advance > 0 {
+			// Advance the time for the test
+			currentTime = currentTime.Add(tt.advance)
 		}
 		t.Run(tt.name, func(t *testing.T) {
 			result := limiter.IsRequestAllowed(tt.key)
