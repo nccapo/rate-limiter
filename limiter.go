@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log"
 	"math"
+	"os"
 	"sync"
 	"time"
 
@@ -41,6 +42,9 @@ type RateLimiter struct {
 	// logger for logging rate limit events
 	logger *log.Logger
 
+	// For testing - override the current time
+	timeNow func() time.Time
+
 	mutex sync.Mutex
 }
 
@@ -51,6 +55,16 @@ func encodeKey(value string) string {
 
 // NewRateLimiter to received and define new RateLimiter struct
 func NewRateLimiter(config *RateLimiter) (*RateLimiter, error) {
+	// Initialize default logger if none is provided
+	if config.logger == nil {
+		config.logger = log.New(os.Stderr, "rate-limiter: ", log.LstdFlags)
+	}
+
+	// Default time function if not set
+	if config.timeNow == nil {
+		config.timeNow = time.Now
+	}
+
 	return config, nil
 }
 
@@ -69,6 +83,18 @@ func (rl *RateLimiter) IsRequestAllowed(key string) bool {
 	rl.mutex.Lock()
 	defer rl.mutex.Unlock()
 
+	// Ensure we have a logger to avoid nil pointer dereference
+	logger := rl.logger
+	if logger == nil {
+		logger = log.New(os.Stderr, "rate-limiter: ", log.LstdFlags)
+	}
+
+	// Get current time (may be overridden for testing)
+	now := time.Now
+	if rl.timeNow != nil {
+		now = rl.timeNow
+	}
+
 	var sEnc string
 	if rl.HashKey {
 		sEnc = keyPrefix + encodeKey(key)
@@ -78,7 +104,7 @@ func (rl *RateLimiter) IsRequestAllowed(key string) bool {
 
 	tokenCount, err := rl.Client.Get(context.Background(), sEnc).Int64()
 	if err != nil && !errors.Is(err, redis.Nil) {
-		rl.logger.Printf("Error getting token count from Redis: %v", err)
+		logger.Printf("Error getting token count from Redis: %v", err)
 		return false
 	}
 
@@ -91,31 +117,39 @@ func (rl *RateLimiter) IsRequestAllowed(key string) bool {
 	if err == nil {
 		lastRefillTime, err = time.Parse(time.RFC3339, lastRefillTimeStr)
 		if err != nil {
-			rl.logger.Printf("Error parsing last refill time from Redis: %v", err)
+			logger.Printf("Error parsing last refill time from Redis: %v", err)
 			return false
 		}
 	} else if !errors.Is(err, redis.Nil) {
-		rl.logger.Printf("Error getting last refill time from Redis: %v", err)
+		logger.Printf("Error getting last refill time from Redis: %v", err)
 		return false
 	} else {
-		lastRefillTime = time.Now()
+		lastRefillTime = now()
 	}
 
-	tokenCount = rl.refill(tokenCount, lastRefillTime)
+	// Store current tokens for header info
+	rl.currentToken = tokenCount
+
+	tokenCount = rl.refillWithTime(tokenCount, lastRefillTime, now())
 
 	if tokenCount >= rl.Rate {
 		tokenCount -= rl.Rate
 		rl.Client.Set(context.Background(), sEnc, tokenCount, 0)
-		rl.Client.Set(context.Background(), sEnc+lastRefillPrefix, time.Now().Format(time.RFC3339), 0)
+		rl.Client.Set(context.Background(), sEnc+lastRefillPrefix, now().Format(time.RFC3339), 0)
 		return true
 	}
 
-	rl.Client.Set(context.Background(), sEnc+lastRefillPrefix, time.Now().Format(time.RFC3339), 0)
+	rl.Client.Set(context.Background(), sEnc+lastRefillPrefix, now().Format(time.RFC3339), 0)
 	return false
 }
 
 func (rl *RateLimiter) refill(currentTokens int64, lastRefillTime time.Time) int64 {
 	now := time.Now()
+	return rl.refillWithTime(currentTokens, lastRefillTime, now)
+}
+
+// refillWithTime calculates token refill with explicitly provided current time
+func (rl *RateLimiter) refillWithTime(currentTokens int64, lastRefillTime time.Time, now time.Time) int64 {
 	elapsed := now.Sub(lastRefillTime)
 
 	// calculate time which each token needs to refill in token bucket
