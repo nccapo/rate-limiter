@@ -71,14 +71,15 @@ var luaRequest = redis.NewScript(`
 
 // RedisStore implements Store using Redis.
 type RedisStore struct {
-	client  *redis.Client
+	client  redis.UniversalClient
 	hashKey bool
 	// Optional: time function for testing (normally time.Now)
 	timeNow func() time.Time
 }
 
 // NewRedisStore creates a new RedisStore.
-func NewRedisStore(client *redis.Client, hashKey bool) *RedisStore {
+// client can be *redis.Client, *redis.ClusterClient, or *redis.Ring.
+func NewRedisStore(client redis.UniversalClient, hashKey bool) *RedisStore {
 	return &RedisStore{
 		client:  client,
 		hashKey: hashKey,
