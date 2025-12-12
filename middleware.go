@@ -5,8 +5,6 @@ import (
 	"net"
 	"net/http"
 	"strconv"
-
-	"github.com/gin-gonic/gin"
 )
 
 const (
@@ -59,36 +57,11 @@ func HTTPRateLimiter(config HTTPRateLimiterConfig) func(http.Handler) http.Handl
 
 			if !config.Limiter.IsRequestAllowed(key) {
 				log.Printf("Rate limit exceeded for key: %s", key)
-				config.StatusHandler(w, r, config.Limiter.MaxTokens, config.Limiter.currentToken)
+				config.StatusHandler(w, r, config.Limiter.MaxTokens, config.Limiter.CurrentToken)
 				return
 			}
 
 			next.ServeHTTP(w, r)
 		})
-	}
-}
-
-// GinRateLimiter returns a Gin middleware function for rate limiting
-func GinRateLimiter(config HTTPRateLimiterConfig) gin.HandlerFunc {
-	if config.KeyFunc == nil {
-		config.KeyFunc = func(r *http.Request) string {
-			// Use Gin context to get client IP if available
-			return r.RemoteAddr
-		}
-	}
-
-	return func(c *gin.Context) {
-		key := config.KeyFunc(c.Request)
-
-		if !config.Limiter.IsRequestAllowed(key) {
-			log.Printf("Rate limit exceeded for key: %s", key)
-			c.Header(HeaderRateLimit, strconv.FormatInt(config.Limiter.MaxTokens, 10))
-			c.Header(HeaderRateLimitRemaining, strconv.FormatInt(config.Limiter.currentToken, 10))
-			c.JSON(http.StatusTooManyRequests, gin.H{"error": "too many requests"})
-			c.Abort()
-			return
-		}
-
-		c.Next()
 	}
 }
