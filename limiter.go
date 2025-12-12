@@ -3,11 +3,8 @@ package rrl
 import (
 	"context"
 	b64 "encoding/base64"
-	"errors"
 	"log"
-	"math"
 	"os"
-	"sync"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -19,18 +16,83 @@ const (
 	lastRefillPrefix = "_lastRefillTime"
 )
 
+// luaRequest is a Redis Lua script to process rate limiting atomically.
+// KEYS[1]: tokens_key
+// KEYS[2]: last_refill_key
+// ARGV[1]: cost (tokens needed for request)
+// ARGV[2]: max_tokens
+// ARGV[3]: refill_interval_ns (nanoseconds to refill 1 token)
+// ARGV[4]: current_time_ns (current unix time in nanoseconds)
+// ARGV[5]: expiration_seconds (TTL for keys)
+var luaRequest = redis.NewScript(`
+	local tokens_key = KEYS[1]
+	local last_refill_key = KEYS[2]
+	
+	local cost = tonumber(ARGV[1])
+	local max_tokens = tonumber(ARGV[2])
+	local refill_interval_ns = tonumber(ARGV[3])
+	local now_ns = tonumber(ARGV[4])
+	local expiration_seconds = tonumber(ARGV[5])
+
+	local current_tokens = tonumber(redis.call("get", tokens_key))
+	local last_refill_ns = tonumber(redis.call("get", last_refill_key))
+
+	if not current_tokens then
+		current_tokens = max_tokens
+	end
+	
+	if not last_refill_ns then
+		last_refill_ns = now_ns
+	end
+
+	-- Calculate elapsed time and tokens to add
+	local elapsed_ns = now_ns - last_refill_ns
+	if elapsed_ns < 0 then elapsed_ns = 0 end -- clock skew protection
+
+	local tokens_to_add = math.floor(elapsed_ns / refill_interval_ns)
+	
+	if tokens_to_add > 0 then
+		current_tokens = math.min(max_tokens, current_tokens + tokens_to_add)
+		-- Update last_refill_ns to the time of the most recent token addition to avoid drift, 
+		-- or just set to now. Setting to 'now' is simpler but can slightly under-fill.
+		-- Better strategy: advance time by the amount of tokens added.
+		last_refill_ns = last_refill_ns + (tokens_to_add * refill_interval_ns)
+		-- Clamp timestamp to now to prevent future timestamps if tokens were capped
+		if last_refill_ns > now_ns then
+			last_refill_ns = now_ns
+		end
+	end
+
+	local allowed = 0
+	local remaining = current_tokens
+
+	if current_tokens >= cost then
+		current_tokens = current_tokens - cost
+		allowed = 1
+		remaining = current_tokens
+	else
+		allowed = 0
+	end
+
+	-- Save state with TTL
+	redis.call("set", tokens_key, current_tokens, "EX", expiration_seconds)
+	redis.call("set", last_refill_key, last_refill_ns, "EX", expiration_seconds)
+
+	return {allowed, remaining}
+`)
+
 // RateLimiter is struct based on Redis
 type RateLimiter struct {
-	// represents the rate at which the bucket should be filled
+	// represents the cost of a request (how many tokens it consumes)
 	Rate int64
 
 	// represents the max tokens capacity that the bucket can hold
 	MaxTokens int64
 
-	// tokens currently present in the bucket at any time
+	// tokens currently present in the bucket at any time (local cache for headers)
 	currentToken int64
 
-	// lastRefillTime represents time that this bucket fill operation was tried
+	// RefillInterval is the duration to refill one token
 	RefillInterval time.Duration
 
 	// client is redis Client
@@ -44,8 +106,6 @@ type RateLimiter struct {
 
 	// For testing - override the current time
 	timeNow func() time.Time
-
-	mutex sync.Mutex
 }
 
 // encodeKey function encodes received value parameter with base64
@@ -69,7 +129,7 @@ func NewRateLimiter(config *RateLimiter) (*RateLimiter, error) {
 }
 
 // IsRequestAllowed function is a method of the RateLimiter struct. It is responsible for determining whether a specific request should be allowed based on the rate limiting rules.
-// This function interacts with Redis to track and enforce the rate limit for a given key
+// This function interacts with Redis using an atomic Lua script to track and enforce the rate limit for a given key.
 //
 // Parameters:
 //
@@ -79,9 +139,7 @@ func NewRateLimiter(config *RateLimiter) (*RateLimiter, error) {
 //
 // bool: Returns true if the request is allowed, false otherwise.
 func (rl *RateLimiter) IsRequestAllowed(key string) bool {
-	// use mutex to avoid race condition
-	rl.mutex.Lock()
-	defer rl.mutex.Unlock()
+	// Local mutex is removed in favor of Redis atomicity
 
 	// Ensure we have a logger to avoid nil pointer dereference
 	logger := rl.logger
@@ -94,6 +152,7 @@ func (rl *RateLimiter) IsRequestAllowed(key string) bool {
 	if rl.timeNow != nil {
 		now = rl.timeNow
 	}
+	nowNs := now().UnixNano()
 
 	var sEnc string
 	if rl.HashKey {
@@ -101,60 +160,48 @@ func (rl *RateLimiter) IsRequestAllowed(key string) bool {
 	} else {
 		sEnc = keyPrefix + key
 	}
+	lastRefillKey := sEnc + lastRefillPrefix
 
-	tokenCount, err := rl.Client.Get(context.Background(), sEnc).Int64()
-	if err != nil && !errors.Is(err, redis.Nil) {
-		logger.Printf("Error getting token count from Redis: %v", err)
-		return false
+	// Calculate TTL (Time To Live) to prevent memory leaks
+	// Expire keys when the bucket would be fully refilled + some buffer.
+	// Example: If it takes 1s to refill 1 token, and max is 10, it takes 10s to fill.
+	// We'll set TTL to a safety margins, e.g., (RefillInterval * MaxTokens) + 60 seconds.
+	// Or at least 1 hour if that calculation is small, to avoid threshing.
+	// For simplicity here: Max(1 hour, RefillInterval * MaxTokens * 2)
+	ttlSeconds := int64(time.Hour.Seconds())
+	refillCycle := int64(rl.RefillInterval.Seconds()) * rl.MaxTokens * 2
+	if refillCycle > ttlSeconds {
+		ttlSeconds = refillCycle
 	}
 
-	if errors.Is(err, redis.Nil) {
-		tokenCount = rl.MaxTokens
+	// Execute Lua Script
+	// ARGV[1]: cost (tokens needed for request) -> rl.Rate
+	// ARGV[2]: max_tokens -> rl.MaxTokens
+	// ARGV[3]: refill_interval_ns -> rl.RefillInterval.Nanoseconds()
+	// ARGV[4]: current_time_ns -> nowNs
+	// ARGV[5]: expiration_seconds -> ttlSeconds
+	result, err := luaRequest.Run(context.Background(), rl.Client,
+		[]string{sEnc, lastRefillKey},
+		rl.Rate,
+		rl.MaxTokens,
+		rl.RefillInterval.Nanoseconds(),
+		nowNs,
+		ttlSeconds,
+	).Slice()
+
+	if err != nil {
+		logger.Printf("Error running rate limit script: %v", err)
+		return false // Fail safe: deny if Redis fails
 	}
 
-	lastRefillTimeStr, err := rl.Client.Get(context.Background(), sEnc+lastRefillPrefix).Result()
-	var lastRefillTime time.Time
-	if err == nil {
-		lastRefillTime, err = time.Parse(time.RFC3339, lastRefillTimeStr)
-		if err != nil {
-			logger.Printf("Error parsing last refill time from Redis: %v", err)
-			return false
-		}
-	} else if !errors.Is(err, redis.Nil) {
-		logger.Printf("Error getting last refill time from Redis: %v", err)
-		return false
-	} else {
-		lastRefillTime = now()
-	}
+	// Lua returns {allowed (0/1), remaining_tokens}
+	allowed := result[0].(int64) == 1
+	remaining := result[1].(int64)
 
-	// Store current tokens for header info
-	rl.currentToken = tokenCount
+	// Update local state for headers (best effort, as this might be stale immediately)
+	rl.currentToken = remaining
 
-	tokenCount = rl.refillWithTime(tokenCount, lastRefillTime, now())
-
-	if tokenCount >= rl.Rate {
-		tokenCount -= rl.Rate
-		rl.Client.Set(context.Background(), sEnc, tokenCount, 0)
-		rl.Client.Set(context.Background(), sEnc+lastRefillPrefix, now().Format(time.RFC3339), 0)
-		return true
-	}
-
-	rl.Client.Set(context.Background(), sEnc+lastRefillPrefix, now().Format(time.RFC3339), 0)
-	return false
+	return allowed
 }
 
-func (rl *RateLimiter) refill(currentTokens int64, lastRefillTime time.Time) int64 {
-	now := time.Now()
-	return rl.refillWithTime(currentTokens, lastRefillTime, now)
-}
-
-// refillWithTime calculates token refill with explicitly provided current time
-func (rl *RateLimiter) refillWithTime(currentTokens int64, lastRefillTime time.Time, now time.Time) int64 {
-	elapsed := now.Sub(lastRefillTime)
-
-	// calculate time which each token needs to refill in token bucket
-	tokensToAdd := elapsed.Nanoseconds() / rl.RefillInterval.Nanoseconds()
-	newTokens := int64(math.Min(float64(currentTokens+tokensToAdd), float64(rl.MaxTokens)))
-
-	return newTokens
-}
+// refill and refillWithTime are no longer needed as logic is moved to Lua script
