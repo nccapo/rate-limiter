@@ -36,17 +36,25 @@ func setupTestLimiter(t *testing.T, rate int64, maxTokens int64) (*RateLimiter, 
 		currentTime = newTime
 	}
 
-	limiter, _ := NewRateLimiter(&RateLimiter{
-		Rate:           rate,
-		MaxTokens:      maxTokens,
-		RefillInterval: 1 * time.Second,
-		Client:         client,
-		HashKey:        false,
-		logger:         testLogger,
-		timeNow: func() time.Time {
+	// Create Redis Store
+	redisStore := NewRedisStore(client, false)
+	redisStore.timeNow = func() time.Time {
+		return currentTime
+	}
+
+	limiter, _ := NewRateLimiter(
+		WithRate(rate),
+		WithMaxTokens(maxTokens),
+		WithRefillInterval(1*time.Second),
+		WithStore(redisStore),
+		WithLogger(testLogger),
+	)
+	// Override limiter timeNow
+	if limiter != nil {
+		limiter.timeNow = func() time.Time {
 			return currentTime
-		},
-	})
+		}
+	}
 	return limiter, advanceTime
 }
 
