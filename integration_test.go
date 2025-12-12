@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
-	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 )
@@ -101,45 +100,6 @@ func TestStandardHTTPIntegration(t *testing.T) {
 	rec3 := httptest.NewRecorder()
 	rateLimitedHandler.ServeHTTP(rec3, req3)
 	assert.Equal(t, http.StatusOK, rec3.Code, "Request after refill should be allowed")
-}
-
-// TestGinIntegration tests integration with Gin framework
-func TestGinIntegration(t *testing.T) {
-	// Create a rate limiter with 1 request per second
-	limiter, _, cleanup := setupRateLimiter(t, 1, 1, time.Second)
-	defer cleanup()
-
-	// Set Gin to test mode
-	gin.SetMode(gin.TestMode)
-
-	// Create a Gin router
-	router := gin.New()
-
-	// Apply rate limiter middleware
-	router.Use(GinRateLimiter(HTTPRateLimiterConfig{
-		Limiter: limiter,
-		KeyFunc: func(r *http.Request) string {
-			return "test-key" // Use a fixed key for testing
-		},
-	}))
-
-	// Add a test route
-	router.GET("/test", func(c *gin.Context) {
-		c.String(http.StatusOK, "success")
-	})
-
-	// First request should be allowed
-	req1, _ := http.NewRequest("GET", "/test", nil)
-	rec1 := httptest.NewRecorder()
-	router.ServeHTTP(rec1, req1)
-	assert.Equal(t, http.StatusOK, rec1.Code, "First request should be allowed")
-	assert.Equal(t, "success", rec1.Body.String())
-
-	// Second request should be blocked
-	req2, _ := http.NewRequest("GET", "/test", nil)
-	rec2 := httptest.NewRecorder()
-	router.ServeHTTP(rec2, req2)
-	assert.Equal(t, http.StatusTooManyRequests, rec2.Code, "Second request should be blocked")
 }
 
 // TestUserBasedRateLimiting tests using different keys for rate limiting

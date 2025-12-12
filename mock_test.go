@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
-	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 )
@@ -99,54 +98,6 @@ func TestStandardHTTPMiddleware(t *testing.T) {
 	req3 := httptest.NewRequest("GET", "/", nil)
 	rec3 := httptest.NewRecorder()
 	rateLimited.ServeHTTP(rec3, req3)
-	assert.Equal(t, http.StatusOK, rec3.Code, "Request after time passes should be allowed")
-	assert.Equal(t, "success", rec3.Body.String())
-}
-
-// Test Gin middleware
-func TestGinMiddleware(t *testing.T) {
-	limiter, advanceTime, cleanup := setupMockTest(t)
-	defer cleanup()
-
-	// Set Gin to test mode
-	gin.SetMode(gin.TestMode)
-
-	// Create a Gin router
-	router := gin.New()
-
-	// Apply rate limiter middleware
-	router.Use(GinRateLimiter(HTTPRateLimiterConfig{
-		Limiter: limiter,
-		KeyFunc: func(r *http.Request) string {
-			return "fixed-key" // Use a constant key for predictable results
-		},
-	}))
-
-	// Add a test route
-	router.GET("/test", func(c *gin.Context) {
-		c.String(http.StatusOK, "success")
-	})
-
-	// First request should be allowed
-	req1, _ := http.NewRequest("GET", "/test", nil)
-	rec1 := httptest.NewRecorder()
-	router.ServeHTTP(rec1, req1)
-	assert.Equal(t, http.StatusOK, rec1.Code, "First request should be allowed")
-	assert.Equal(t, "success", rec1.Body.String())
-
-	// Second request should be blocked (rate limit: 1 req/sec)
-	req2, _ := http.NewRequest("GET", "/test", nil)
-	rec2 := httptest.NewRecorder()
-	router.ServeHTTP(rec2, req2)
-	assert.Equal(t, http.StatusTooManyRequests, rec2.Code, "Second request should be blocked")
-
-	// Advance time by 2 seconds for the next request
-	advanceTime(time.Now().Add(2 * time.Second))
-
-	// After time passes, next request should be allowed
-	req3, _ := http.NewRequest("GET", "/test", nil)
-	rec3 := httptest.NewRecorder()
-	router.ServeHTTP(rec3, req3)
 	assert.Equal(t, http.StatusOK, rec3.Code, "Request after time passes should be allowed")
 	assert.Equal(t, "success", rec3.Body.String())
 }
