@@ -43,17 +43,34 @@ func setupRateLimiter(t *testing.T, rate, maxTokens int64, interval time.Duratio
 		currentTime = newTime
 	}
 
-	limiter, _ := NewRateLimiter(&RateLimiter{
-		Rate:           rate,
-		MaxTokens:      maxTokens,
-		RefillInterval: interval,
-		Client:         client,
-		HashKey:        false,
-		logger:         testLogger,
-		timeNow: func() time.Time {
-			return currentTime
-		},
-	})
+	// Helper to expose private timeNow for testing
+	// In a real scenario we'd export WithTimeNow or similar for testing packages
+	// For this refactor, we can rely on standard time or add Option support.
+	// But `timeNow` is unexported in `RateLimiter` and `NewRateLimiter` doesn't expose it.
+	// Let's add `WithTimeNow` to `setupRateLimiter` helper using a trick or just use MemoryStore which we can control?
+	// The `RedisStore` also has `timeNow`.
+
+	// Better approach: NewRedisStore takes `timeNow`? No, it's unexported.
+	// But `NewRedisStore` returns `*RedisStore`.
+	// We can update `NewRedisStore` to take generic options? Or just manually set it if we are in the same package (rrl).
+	// Yes, `integration_test.go` is package `rrl`. We can access unexported fields of `RedisStore` and `RateLimiter`!
+
+	redisStore := NewRedisStore(client, false)
+	redisStore.timeNow = func() time.Time {
+		return currentTime
+	}
+
+	limiter, _ := NewRateLimiter(
+		WithRate(rate),
+		WithMaxTokens(maxTokens),
+		WithRefillInterval(interval),
+		WithStore(redisStore),
+		WithLogger(testLogger),
+	)
+	// Also override limiter's timeNow just in case logic uses it (though it primarily uses Store)
+	limiter.timeNow = func() time.Time {
+		return currentTime
+	}
 
 	// Return cleanup function
 	cleanup := func() {

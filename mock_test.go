@@ -38,18 +38,23 @@ func setupMockTest(t *testing.T) (*RateLimiter, func(time.Time), func()) {
 		currentTime = newTime
 	}
 
+	// Create Redis Store
+	redisStore := NewRedisStore(client, false)
+	redisStore.timeNow = func() time.Time {
+		return currentTime
+	}
+
 	// Create a rate limiter with extremely restrictive limits for testing
-	limiter, _ := NewRateLimiter(&RateLimiter{
-		Rate:           1, // Only allow 1 request
-		MaxTokens:      1, // Maximum token bucket size of 1
-		RefillInterval: 1 * time.Second,
-		Client:         client,
-		HashKey:        false,
-		logger:         testLogger,
-		timeNow: func() time.Time {
-			return currentTime
-		},
-	})
+	limiter, _ := NewRateLimiter(
+		WithRate(1),
+		WithMaxTokens(1),
+		WithRefillInterval(1*time.Second),
+		WithStore(redisStore),
+		WithLogger(testLogger),
+	)
+	limiter.timeNow = func() time.Time {
+		return currentTime
+	}
 
 	// Return cleanup function
 	cleanup := func() {

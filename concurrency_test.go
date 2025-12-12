@@ -32,16 +32,15 @@ func TestRateLimiter_Concurrency(t *testing.T) {
 	client, mr := setupConcurrentRedis(t)
 	defer mr.Close()
 
-	// Config: 50 tokens max, refill very slowly (so no refill during test)
+	// Config: 50 tokens max, refill very slowly (so no refill during	// 3. Create RateLimiter with new Functional Options
 	maxTokens := int64(50)
-	limiter, err := NewRateLimiter(&RateLimiter{
-		Rate:           1,
-		MaxTokens:      maxTokens,
-		RefillInterval: 1 * time.Hour, // effectively no refill during test
-		Client:         client,
-		HashKey:        false,
-		logger:         log.Default(),
-	})
+	limiter, err := NewRateLimiter(
+		WithRate(1),
+		WithMaxTokens(maxTokens),
+		WithRefillInterval(time.Second), // Refill 1 token per second
+		WithStore(NewRedisStore(client, false)),
+		WithLogger(log.Default()),
+	)
 	assert.NoError(t, err)
 
 	// We'll spawn 100 concurrent requests.

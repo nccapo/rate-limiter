@@ -57,15 +57,12 @@ func setupRateLimiter(t *testing.T, rate, maxTokens int64, interval time.Duratio
 	// Let's go with Option 4 or Option 1. Option 1 is faster refactor.
 	// Let's change `timeNow` to `TimeNow` in `limiter.go`.
 
-	limiter, _ := rrl.NewRateLimiter(&rrl.RateLimiter{
-		Rate:           rate,
-		MaxTokens:      maxTokens,
-		RefillInterval: interval,
-		Client:         client,
-		HashKey:        false,
-		// logger:         testLogger, // logger is unexported too!
-		// TimeNow: ...
-	})
+	limiter, _ := rrl.NewRateLimiter(
+		rrl.WithRate(rate),
+		rrl.WithMaxTokens(maxTokens),
+		rrl.WithRefillInterval(interval),
+		rrl.WithStore(rrl.NewRedisStore(client, false)),
+	)
 
 	// We need to fix visibility of logger and timeNow in 'limiter.go' first.
 	// Or we just test "black box" style (wait 1 second).

@@ -35,17 +35,25 @@ func TestRateLimiter_Allow(t *testing.T) {
 	// Create a mutable time reference for testing
 	currentTime := time.Now()
 
-	limiter, err := NewRateLimiter(&RateLimiter{
-		Rate:           1,
-		MaxTokens:      5,
-		RefillInterval: 1 * time.Second,
-		Client:         client,
-		HashKey:        false,
-		logger:         testLogger,
-		timeNow: func() time.Time {
+	// Create Redis Store
+	redisStore := NewRedisStore(client, false)
+	redisStore.timeNow = func() time.Time {
+		return currentTime
+	}
+
+	limiter, err := NewRateLimiter(
+		WithRate(1),
+		WithMaxTokens(5),
+		WithRefillInterval(1*time.Second),
+		WithStore(redisStore),
+		WithLogger(testLogger),
+	)
+	// Override limiter timeNow as well
+	if limiter != nil {
+		limiter.timeNow = func() time.Time {
 			return currentTime
-		},
-	})
+		}
+	}
 	if err != nil {
 		t.Fatal(err)
 	}

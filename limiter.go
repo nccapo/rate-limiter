@@ -3,11 +3,10 @@ package rrl
 import (
 	"context"
 	b64 "encoding/base64"
+	"errors"
 	"log"
 	"os"
 	"time"
-
-	"github.com/redis/go-redis/v9"
 )
 
 // define constant variable of keyPrefix to avoid duplicate key in Redis
@@ -30,23 +29,52 @@ type RateLimiter struct {
 	// RefillInterval is the duration to refill one token
 	RefillInterval time.Duration
 
-	// Client is redis Client
-	// Deprecated: Use Store instead. If Client is set, a RedisStore will be created automatically.
-	Client *redis.Client
-
 	// Store defines the storage backend for the rate limiter
 	Store Store
-
-	// decide to hash redis key
-	// Deprecated: Use valid Store configuration. HasKey logic is now handled by RedisStore.
-	HashKey bool
 
 	// logger for logging rate limit events
 	logger *log.Logger
 
 	// For testing - override the current time
-	// Deprecated: This logic will primarily affect default RedisStore.
 	timeNow func() time.Time
+}
+
+// Option defines a functional configuration option for RateLimiter.
+type Option func(*RateLimiter)
+
+// WithRate sets the number of tokens consumed per request (default 1).
+func WithRate(rate int64) Option {
+	return func(rl *RateLimiter) {
+		rl.Rate = rate
+	}
+}
+
+// WithMaxTokens sets the maximum bucket size (burst capacity).
+func WithMaxTokens(maxTokens int64) Option {
+	return func(rl *RateLimiter) {
+		rl.MaxTokens = maxTokens
+	}
+}
+
+// WithRefillInterval sets the duration to refill one token.
+func WithRefillInterval(interval time.Duration) Option {
+	return func(rl *RateLimiter) {
+		rl.RefillInterval = interval
+	}
+}
+
+// WithStore sets the storage backend.
+func WithStore(store Store) Option {
+	return func(rl *RateLimiter) {
+		rl.Store = store
+	}
+}
+
+// WithLogger sets a custom logger.
+func WithLogger(logger *log.Logger) Option {
+	return func(rl *RateLimiter) {
+		rl.logger = logger
+	}
 }
 
 // encodeKey function encodes received value parameter with base64
@@ -54,57 +82,50 @@ func encodeKey(value string) string {
 	return b64.StdEncoding.EncodeToString([]byte(value))
 }
 
-// NewRateLimiter to received and define new RateLimiter struct
-func NewRateLimiter(config *RateLimiter) (*RateLimiter, error) {
-	// Initialize default logger if none is provided
-	if config.logger == nil {
-		config.logger = log.New(os.Stderr, "rate-limiter: ", log.LstdFlags)
+// NewRateLimiter creates a new RateLimiter with the given options.
+func NewRateLimiter(opts ...Option) (*RateLimiter, error) {
+	// Default configuration
+	rl := &RateLimiter{
+		Rate:           1,
+		MaxTokens:      10,
+		RefillInterval: time.Second,
+		timeNow:        time.Now,
+		logger:         log.New(os.Stderr, "rate-limiter: ", log.LstdFlags),
 	}
 
-	// Default time function if not set
-	if config.timeNow == nil {
-		config.timeNow = time.Now
+	// Apply options
+	for _, opt := range opts {
+		opt(rl)
 	}
 
-	// Backward Compatibility: If Store is not set but Client is, create a RedisStore
-	if config.Store == nil && config.Client != nil {
-		redisStore := NewRedisStore(config.Client, config.HashKey)
-		// Inject testing time if present
-		if config.timeNow != nil {
-			redisStore.timeNow = config.timeNow
-		}
-		config.Store = redisStore
+	// Validate configuration
+	if rl.Store == nil {
+		return nil, errors.New("rate limiter store is required (use WithStore)")
+	}
+	if rl.Rate <= 0 {
+		return nil, errors.New("rate must be greater than 0")
+	}
+	if rl.MaxTokens <= 0 {
+		return nil, errors.New("max tokens must be greater than 0")
+	}
+	if rl.RefillInterval <= 0 {
+		return nil, errors.New("refill interval must be greater than 0")
 	}
 
-	return config, nil
+	return rl, nil
 }
 
-// IsRequestAllowed function is a method of the RateLimiter struct. It is responsible for determining whether a specific request should be allowed based on the rate limiting rules.
-// This function interacts with the configured Store to enforce the rate limit.
-//
-// Parameters:
-//
-// key (string): A unique identifier for the request, typically representing the client making the request, such as an IP address.
-//
-// Returns:
-//
-// bool: Returns true if the request is allowed, false otherwise.
+// IsRequestAllowed checks if the request is allowed for the given key.
 func (rl *RateLimiter) IsRequestAllowed(key string) bool {
-	// Ensure we have a logger to avoid nil pointer dereference
-	logger := rl.logger
-	if logger == nil {
-		logger = log.New(os.Stderr, "rate-limiter: ", log.LstdFlags)
-	}
-
 	if rl.Store == nil {
-		logger.Printf("Store is not initialized")
+		rl.logger.Printf("Store is not initialized")
 		return false
 	}
 
 	// Delegate to the Store
 	allowed, remaining, err := rl.Store.Allow(context.Background(), key, rl.Rate, rl.MaxTokens, rl.RefillInterval)
 	if err != nil {
-		logger.Printf("Rate limit storage error: %v", err)
+		rl.logger.Printf("Rate limit storage error: %v", err)
 		return false // Fail safe
 	}
 
