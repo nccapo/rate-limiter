@@ -27,7 +27,7 @@ func NewMemoryStore() *MemoryStore {
 	}
 }
 
-func (s *MemoryStore) Allow(ctx context.Context, key string, cost int64, maxTokens int64, refillInterval time.Duration) (bool, int64, error) {
+func (s *MemoryStore) Allow(ctx context.Context, key string, cost int64, maxTokens int64, refillInterval time.Duration) (bool, int64, time.Duration, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -62,10 +62,16 @@ func (s *MemoryStore) Allow(ctx context.Context, key string, cost int64, maxToke
 	}
 
 	allowed := false
+	var retryAfter time.Duration
+
 	if bucket.tokens >= cost {
 		bucket.tokens -= cost
 		allowed = true
+	} else {
+		// Calculate missing tokens
+		needed := cost - bucket.tokens
+		retryAfter = time.Duration(needed * refillIntervalNs)
 	}
 
-	return allowed, bucket.tokens, nil
+	return allowed, bucket.tokens, retryAfter, nil
 }

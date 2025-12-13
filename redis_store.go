@@ -53,6 +53,7 @@ var luaRequest = redis.NewScript(`
 
 	local allowed = 0
 	local remaining = current_tokens
+	local retry_after_ns = 0
 
 	if current_tokens >= cost then
 		current_tokens = current_tokens - cost
@@ -60,13 +61,16 @@ var luaRequest = redis.NewScript(`
 		remaining = current_tokens
 	else
 		allowed = 0
+		-- Calculate time needed to refill enough tokens: (cost - current_tokens) * refill_interval
+		local needed = cost - current_tokens
+		retry_after_ns = needed * refill_interval_ns
 	end
 
 	-- Save state with TTL
 	redis.call("set", tokens_key, current_tokens, "EX", expiration_seconds)
 	redis.call("set", last_refill_key, last_refill_ns, "EX", expiration_seconds)
 
-	return {allowed, remaining}
+	return {allowed, remaining, retry_after_ns}
 `)
 
 // RedisStore implements Store using Redis.
@@ -87,7 +91,7 @@ func NewRedisStore(client redis.UniversalClient, hashKey bool) *RedisStore {
 	}
 }
 
-func (s *RedisStore) Allow(ctx context.Context, key string, cost int64, maxTokens int64, refillInterval time.Duration) (bool, int64, error) {
+func (s *RedisStore) Allow(ctx context.Context, key string, cost int64, maxTokens int64, refillInterval time.Duration) (bool, int64, time.Duration, error) {
 	now := s.timeNow()
 	nowNs := now.UnixNano()
 
@@ -116,11 +120,12 @@ func (s *RedisStore) Allow(ctx context.Context, key string, cost int64, maxToken
 	).Slice()
 
 	if err != nil {
-		return false, 0, err
+		return false, 0, 0, err
 	}
 
 	allowed := result[0].(int64) == 1
 	remaining := result[1].(int64)
+	retryAfterNs := result[2].(int64)
 
-	return allowed, remaining, nil
+	return allowed, remaining, time.Duration(retryAfterNs), nil
 }
