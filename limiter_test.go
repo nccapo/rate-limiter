@@ -1,6 +1,7 @@
 package rrl
 
 import (
+	"context"
 	"io"
 	"log"
 	"testing"
@@ -83,4 +84,41 @@ func TestRateLimiter_Allow(t *testing.T) {
 			assert.Equal(t, tt.expected, result)
 		})
 	}
+}
+
+func TestRateLimiter_Wait(t *testing.T) {
+	client, mr := setupRedisClient(t)
+	defer mr.Close()
+
+	// 1 token per second, max 1
+	store := NewRedisStore(client, false)
+	// We need to inject timeNow into store if we want deterministic wait,
+	// but Wait uses time.After/Timer which depends on real time.
+	// So we can only test that it blocks approximately correctly or use a very short interval.
+
+	limiter, err := NewRateLimiter(
+		WithRate(1),
+		WithMaxTokens(1),
+		WithRefillInterval(100*time.Millisecond), // Fast refill for testing
+		WithStore(store),
+	)
+
+	if err != nil {
+		t.Fatalf("Failed to create limiter: %v", err)
+	}
+
+	ctx := context.Background()
+
+	// 1. First request immediate
+	start := time.Now()
+	err = limiter.Wait(ctx, "wait-user")
+	assert.NoError(t, err)
+	assert.True(t, time.Since(start) < 50*time.Millisecond)
+
+	// 2. Second request should wait ~100ms
+	start = time.Now()
+	err = limiter.Wait(ctx, "wait-user")
+	assert.NoError(t, err)
+	elapsed := time.Since(start)
+	assert.True(t, elapsed >= 80*time.Millisecond, "Should wait at least 80ms, got %v", elapsed)
 }

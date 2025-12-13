@@ -18,6 +18,7 @@ type Store interface {
 	// Returns:
 	// allowed: true if request is within limits.
 	// remaining: tokens left in the bucket.
+	// retryAfter: time to wait before the request would be allowed (if not allowed).
 	// err: any backend error.
-	Allow(ctx context.Context, key string, cost int64, maxTokens int64, refillInterval time.Duration) (allowed bool, remaining int64, err error)
+	Allow(ctx context.Context, key string, cost int64, maxTokens int64, refillInterval time.Duration) (allowed bool, remaining int64, retryAfter time.Duration, err error)
 }

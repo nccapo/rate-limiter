@@ -77,6 +77,20 @@ func WithLogger(logger *log.Logger) Option {
 	}
 }
 
+// WithStrictPacing configures the limiter to strict Leaky Bucket mode (no bursts).
+// Effectively sets MaxTokens to 1 (or match Rate), ensuring requests are spaced evenly.
+func WithStrictPacing() Option {
+	return func(rl *RateLimiter) {
+		// Strict pacing means we don't allow bursts.
+		// If Rate is 1, MaxTokens should be 1.
+		// If Rate is N, MaxTokens should be N to allow batch of size N but no more?
+		// Usually "WithoutSlack" in uber-go/ratelimit means per() is enforced strictly.
+		// For TokenBucket, setting MaxTokens = Rate is the closest approximation to "allow 1 batch" but no accumulation.
+		// BETTER: MaxTokens = 1 means we can only ever hold 1 token.
+		rl.MaxTokens = 1
+	}
+}
+
 // encodeKey function encodes received value parameter with base64
 func encodeKey(value string) string {
 	return b64.StdEncoding.EncodeToString([]byte(value))
@@ -115,6 +129,14 @@ func NewRateLimiter(opts ...Option) (*RateLimiter, error) {
 	return rl, nil
 }
 
+// NewUnlimited creates a RateLimiter that allows all requests.
+// Useful for testing or disabling limits.
+func NewUnlimited() *RateLimiter {
+	return &RateLimiter{
+		Store: &noopStore{},
+	}
+}
+
 // IsRequestAllowed checks if the request is allowed for the given key.
 func (rl *RateLimiter) IsRequestAllowed(key string) bool {
 	if rl.Store == nil {
@@ -123,7 +145,7 @@ func (rl *RateLimiter) IsRequestAllowed(key string) bool {
 	}
 
 	// Delegate to the Store
-	allowed, remaining, err := rl.Store.Allow(context.Background(), key, rl.Rate, rl.MaxTokens, rl.RefillInterval)
+	allowed, remaining, _, err := rl.Store.Allow(context.Background(), key, rl.Rate, rl.MaxTokens, rl.RefillInterval)
 	if err != nil {
 		rl.logger.Printf("Rate limit storage error: %v", err)
 		return false // Fail safe
@@ -133,4 +155,48 @@ func (rl *RateLimiter) IsRequestAllowed(key string) bool {
 	rl.CurrentToken = remaining
 
 	return allowed
+}
+
+// Wait blocks until the request is allowed or the context is cancelled.
+// It uses the Store to determine how long to wait.
+func (rl *RateLimiter) Wait(ctx context.Context, key string) error {
+	for {
+		// Check if context is already done
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		allowed, _, retryAfter, err := rl.Store.Allow(ctx, key, rl.Rate, rl.MaxTokens, rl.RefillInterval)
+		if err != nil {
+			return err
+		}
+
+		if allowed {
+			return nil
+		}
+
+		// Wait for the required duration
+		if retryAfter > 0 {
+			timer := time.NewTimer(retryAfter)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return ctx.Err()
+			case <-timer.C:
+				// Retry loop
+			}
+		} else {
+			// Should ideally not happen if allowed=false, but prevent busy loop
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+}
+
+// noopStore is a store that allows everything
+type noopStore struct{}
+
+func (n *noopStore) Allow(ctx context.Context, key string, cost int64, maxTokens int64, refillInterval time.Duration) (bool, int64, time.Duration, error) {
+	return true, maxTokens, 0, nil
 }

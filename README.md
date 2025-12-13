@@ -12,6 +12,7 @@ A robust, thread-safe, and distributed rate limiter for Go, designed for high-th
     *   **Redis**: First-class support for `go-redis/v9`. Ideal for microservices and load-balanced APIs.
     *   **In-Memory**: fast, thread-safe local storage. Perfect for unit tests or standalone binaries.
 *   **⚙️ Functional Options**: Clean, idiomatic Go API for configuration (`WithRate`, `WithStore`, etc.).
+*   **⏮️ Blocking Support**: `Wait(ctx, key)` method for client-side throttling (like `uber-go/ratelimit`'s `Take`).
 *   **🔌 Middleware Ready**:
     *   Standard `net/http` middleware included.
     *   Specialized `Gin` middleware available in a sub-package.
@@ -52,21 +53,14 @@ func main() {
 
 	// 2. Configure the Rate Limiter
 	// NewRedisStore(client, hashKey)
-	// - client: your redis connection
+	// - client: your redis connection (UniversalClient: supports Cluster/Ring)
 	// - hashKey: if true, keys are base64 encoded to avoid issues with special chars
 	store := rrl.NewRedisStore(rdb, true)
 
 	limiter, err := rrl.NewRateLimiter(
 		rrl.WithRate(10),                    // Cost: 10 tokens per request (or use 1 for standard counting)
 		rrl.WithMaxTokens(100),              // Capacity: Bucket holds 100 tokens max
-		rrl.WithRefillInterval(time.Second), // Refill: Add query cost back continuously (e.g. 1 token/sec implied by rate logic if cost=1)
-        // Wait, clarification on Refill logic: 
-        // WithRate(N) sets the COST per request.
-        // WithRefillInterval(d) sets how long it takes to refill ONE token.
-        // CHECK: If you want 10 reqs/sec:
-        // MaxTokens: 10
-        // RefillInterval: 100ms (1s / 10)
-        // Rate (Cost): 1
+		rrl.WithRefillInterval(time.Second), // Refill: Add query cost back continuously
 		rrl.WithStore(store),
 	)
 	if err != nil {
@@ -75,33 +69,43 @@ func main() {
 }
 ```
 
-### 2. Using In-Memory Storage
+### 2. Client-Side Throttling (Blocking)
 
-Use this mode for local development, testing, or simple single-instance applications where shared state isn't required.
+If you are writing a worker or client that sends requests, you can use `Wait()` to automatically sleep until a token is available. This mimics `uber-go/ratelimit`'s `Take()` behavior.
 
 ```go
-package main
-
-import (
-	"log"
-	"time"
-	rrl "github.com/nccapo/rate-limiter"
-)
-
-func main() {
-	// No Redis needed!
-	store := rrl.NewMemoryStore()
-
-	limiter, err := rrl.NewRateLimiter(
-		rrl.WithRate(1),                     // Cost of 1 token per check
-		rrl.WithMaxTokens(50),               // Allow burst of 50 requests
-		rrl.WithRefillInterval(time.Second), // Refill 1 token every second (1 req/sec sustainable)
-		rrl.WithStore(store),
-	)
-	if err != nil {
-		log.Fatal(err)
-	}
+func worker(ctx context.Context, limiter *rrl.RateLimiter) {
+    for {
+        // Blocks until request is allowed
+        if err := limiter.Wait(ctx, "worker-id"); err != nil {
+            return // Context cancelled
+        }
+        
+        // Do heavy work...
+        performTask()
+    }
 }
+```
+
+### 3. Strict Pacing (Leaky Bucket Style)
+
+To enforce strict spacing between requests (no bursts), use `WithStrictPacing()`.
+
+```go
+limiter, _ := rrl.NewRateLimiter(
+    rrl.WithRate(1),
+    rrl.WithRefillInterval(100 * time.Millisecond), // 10 reqs/sec
+    rrl.WithStrictPacing(), // MaxTokens = 1 (No bursts!)
+    rrl.WithStore(store),
+)
+```
+
+### 4. Unlimited (Testing)
+
+For tests where you want to disable blocking completely:
+
+```go
+limiter := rrl.NewUnlimited()
 ```
 
 ### 📋 Available Options
@@ -110,6 +114,7 @@ func main() {
 |--------|-------------|---------|
 | `WithRate(int64)` | The number of tokens required for a single request (Cost). | `1` |
 | `WithMaxTokens(int64)` | The maximum capacity of the bucket (Burst size). | `10` |
+| `WithStrictPacing()` | Sets `MaxTokens` to 1. Disables bursts, ensuring strict spacing. | `false` |
 | `WithRefillInterval(duration)` | The time it takes to refill **one** token. | `1s` |
 | `WithStore(Store)` | The storage backend (`RedisStore` or `MemoryStore`). | **Required** |
 | `WithLogger(*log.Logger)` | Custom logger for debug/error events. | `os.Stderr` |
