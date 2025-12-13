@@ -4,6 +4,10 @@ A robust, thread-safe, and distributed rate limiter for Go, designed for high-th
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Go Version](https://img.shields.io/badge/go-%3E%3D1.20-blue)
+[![Go Report Card](https://goreportcard.com/badge/github.com/nccapo/rate-limiter)](https://goreportcard.com/report/github.com/nccapo/rate-limiter)
+[![GoDoc](https://godoc.org/github.com/nccapo/rate-limiter?status.svg)](https://godoc.org/github.com/nccapo/rate-limiter)
+[![Build Status](https://github.com/nccapo/rate-limiter/actions/workflows/go.yml/badge.svg)](https://github.com/nccapo/rate-limiter/actions)
+[![codecov](https://codecov.io/gh/nccapo/rate-limiter/branch/master/graph/badge.svg)](https://codecov.io/gh/nccapo/rate-limiter)
 
 ## 🚀 Features
 
@@ -197,3 +201,27 @@ Pull requests are welcome! For major changes, please open an issue first to disc
 ## 📄 License
 
 [MIT](https://choosealicense.com/licenses/mit/)
+
+## 📊 Benchmarks
+
+Hardware: Apple M1 Pro
+
+```text
+BenchmarkMemoryStore_Allow-10    13665328        85.44 ns/op       0 B/op       0 allocs/op
+BenchmarkRedisStore_Allow-10       14238     85246 ns/op      208 B/op       6 allocs/op
+BenchmarkMemoryStore_Wait-10      5834898       197.6 ns/op      48 B/op       1 allocs/op
+```
+
+*   **MemoryStore**: Ultra-low latency (~85ns), zero allocations.
+*   **RedisStore**: Dependent on network (mocked here, showing ~85µs overhead for client/lua parsing).
+
+## 🆚 Comparison
+
+| Feature | `nccapo/rate-limiter` | `uber-go/ratelimit` |
+| :--- | :---: | :---: |
+| **Algorithm** | Token Bucket (Allow Bursts) | Leaky Bucket (Smooth) |
+| **Distributed** | ✅ Yes (Redis) | ❌ No (Local only) |
+| **Atomic** | ✅ Yes (Lua Scripts) | ✅ Yes (Atomic CAS) |
+| **Blocking Wait** | ✅ Yes (`Wait`) | ✅ Yes (`Take`) |
+| **Strict Pacing** | ✅ Yes (`WithStrictPacing`) | ✅ Yes (`WithoutSlack`) |
+| **Middleware** | ✅ Yes (Http & Gin) | ❌ No |
