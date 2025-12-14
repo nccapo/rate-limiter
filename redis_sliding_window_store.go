@@ -2,6 +2,9 @@ package rrl
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"io"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -14,6 +17,7 @@ import (
 // ARGV[3]: now_ns (current time)
 // ARGV[4]: cost
 // ARGV[5]: expiration_seconds (TTL)
+// ARGV[6]: request_id (unique random identifier for this batch)
 var luaSlidingWindow = redis.NewScript(`
 	local key = KEYS[1]
 	local window_size_ns = tonumber(ARGV[1])
@@ -21,6 +25,7 @@ var luaSlidingWindow = redis.NewScript(`
 	local now_ns = tonumber(ARGV[3])
 	local cost = tonumber(ARGV[4])
 	local ttl = tonumber(ARGV[5])
+	local request_id = ARGV[6]
 
 	-- 1. Remove entries older than (now - window_size)
 	local window_start = now_ns - window_size_ns
@@ -39,9 +44,10 @@ var luaSlidingWindow = redis.NewScript(`
 		remaining = limit - (current_count + cost)
 		
 		-- Add 'cost' members. We need unique members if they have same timestamp.
-		-- Use math.random() to avoid collisions for same-timestamp requests.
+		-- Use request_id passed from Go to ensure uniqueness across distributed systems.
 		for i = 1, cost do
-			local member = tostring(now_ns) .. ":" .. i .. ":" .. tostring(math.random(1000000))
+			-- Format: time_ns:index:request_id
+			local member = tostring(now_ns) .. ":" .. i .. ":" .. request_id
 			redis.call("ZADD", key, now_ns, member)
 		end
 	else
@@ -102,19 +108,7 @@ func (s *RedisSlidingWindowStore) Allow(ctx context.Context, key string, cost in
 		sEnc = keyPrefix + key + ":sw"
 	}
 
-	// Logic Mapping:
-	// TokenBucket: Capacity=maxTokens, Rate=1/refillInterval
-	// SlidingWindow: Limit=maxTokens, WindowSize=maxTokens*refillInterval ?
-	// Example: Rate=10, Max=100 (Burst). Refill=100ms.
-	// We want strict window.
-	// Usually strict window is defined as "Limit N per Window W".
-	// If user passes `WithMaxTokens(100)` and `WithRefillInterval(time.Second)`:
-	// Interpretation A: 100 reqs per 100 seconds? (1 Token refill = 1 sec).
-	// Interpretation B: RefillInterval is irrelevant/forced?
-
 	// Convention we agreed: WindowSize = Limit * RefillInterval.
-	// If Limit=10, Refill=1s (1 req/s average). Window = 10s.
-	// "10 requests per 10 seconds". This matches the average rate.
 	windowSizeNs := maxTokens * refillInterval.Nanoseconds()
 
 	// TTL: Window Size + Buffer (e.g. 1 min or 2x window)
@@ -123,6 +117,10 @@ func (s *RedisSlidingWindowStore) Allow(ctx context.Context, key string, cost in
 		ttlSeconds = 60
 	}
 
+	// Generate Unique Request ID (UUID-like)
+	// We use 12 bytes of random hex (should be enough collision resistance for this purpose)
+	reqID := generateRandomID()
+
 	result, err := luaSlidingWindow.Run(ctx, s.client,
 		[]string{sEnc},
 		windowSizeNs,
@@ -130,6 +128,7 @@ func (s *RedisSlidingWindowStore) Allow(ctx context.Context, key string, cost in
 		nowNs,
 		cost,
 		ttlSeconds,
+		reqID,
 	).Slice()
 
 	if err != nil {
@@ -141,4 +140,13 @@ func (s *RedisSlidingWindowStore) Allow(ctx context.Context, key string, cost in
 	retryAfterNs := result[2].(int64)
 
 	return allowed, remaining, time.Duration(retryAfterNs), nil
+}
+
+func generateRandomID() string {
+	b := make([]byte, 12)
+	if _, err := io.ReadFull(rand.Reader, b); err != nil {
+		// Fallback if reader fails (unlikely)
+		return time.Now().String()
+	}
+	return hex.EncodeToString(b)
 }

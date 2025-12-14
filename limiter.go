@@ -37,6 +37,9 @@ type RateLimiter struct {
 
 	// For testing - override the current time
 	timeNow func() time.Time
+
+	// metrics recorder for observability
+	metrics MetricsRecorder
 }
 
 // Option defines a functional configuration option for RateLimiter.
@@ -77,6 +80,13 @@ func WithLogger(logger *log.Logger) Option {
 	}
 }
 
+// WithMetrics sets the metrics recorder.
+func WithMetrics(m MetricsRecorder) Option {
+	return func(rl *RateLimiter) {
+		rl.metrics = m
+	}
+}
+
 // WithStrictPacing configures the limiter to strict Leaky Bucket mode (no bursts).
 // Effectively sets MaxTokens to 1 (or match Rate), ensuring requests are spaced evenly.
 func WithStrictPacing() Option {
@@ -105,6 +115,7 @@ func NewRateLimiter(opts ...Option) (*RateLimiter, error) {
 		RefillInterval: time.Second,
 		timeNow:        time.Now,
 		logger:         log.New(os.Stderr, "rate-limiter: ", log.LstdFlags),
+		metrics:        &NoOpMetrics{},
 	}
 
 	// Apply options
@@ -139,6 +150,7 @@ func NewUnlimited() *RateLimiter {
 
 // IsRequestAllowed checks if the request is allowed for the given key.
 func (rl *RateLimiter) IsRequestAllowed(key string) bool {
+	start := time.Now()
 	if rl.Store == nil {
 		rl.logger.Printf("Store is not initialized")
 		return false
@@ -146,6 +158,12 @@ func (rl *RateLimiter) IsRequestAllowed(key string) bool {
 
 	// Delegate to the Store
 	allowed, remaining, _, err := rl.Store.Allow(context.Background(), key, rl.Rate, rl.MaxTokens, rl.RefillInterval)
+	duration := time.Since(start)
+
+	if rl.metrics != nil {
+		rl.metrics.Record(context.Background(), key, allowed, duration, err)
+	}
+
 	if err != nil {
 		rl.logger.Printf("Rate limit storage error: %v", err)
 		return false // Fail safe
