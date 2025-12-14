@@ -39,17 +39,9 @@ var luaSlidingWindow = redis.NewScript(`
 		remaining = limit - (current_count + cost)
 		
 		-- Add 'cost' members. We need unique members if they have same timestamp.
-		-- ZADD supports multiple members. We'll verify cost > 0.
+		-- Use math.random() to avoid collisions for same-timestamp requests.
 		for i = 1, cost do
-			-- Use a tiny suffix or unique implementation detail if needed.
-			-- Ideally we just use member = timestamp. But duplicates are overwritten in ZSET.
-			-- Trick: value = timestamp + micro-counter? or just use unique strings?
-			-- Simplification: "value" = "timestamp_micro_random"
-			-- Lua doesn't have good random. 
-			-- ALTERNATIVE: Use just 1 entry with 'score=timestamp' and 'member' is unique?
-			-- Actually for rate limiting, we just need to count.
-			-- Let's append index to 'now_ns' string for member uniqueness.
-			local member = tostring(now_ns) .. ":" .. i
+			local member = tostring(now_ns) .. ":" .. i .. ":" .. tostring(math.random(1000000))
 			redis.call("ZADD", key, now_ns, member)
 		end
 	else
@@ -62,8 +54,12 @@ var luaSlidingWindow = redis.NewScript(`
 		-- We need to wait until the Oldest timestamp expires.
 		-- Fetch the oldest entry (smallest score).
 		local oldest_entries = redis.call("ZRANGE", key, 0, 0, "WITHSCORES")
-		if #oldest_entries > 1 then
-			local oldest_score = tonumber(oldest_entries[2]) -- [1]=member, [2]=score
+		if #oldest_entries > 0 then
+			-- Redis returns array [member, score]. Go-redis Slice/Map depends on version/flags.
+			-- If passing "WITHSCORES", response is usually flat array.
+			-- entry 1: member, entry 2: score.
+			local oldest_score = tonumber(oldest_entries[2]) 
+			
 			-- Time when this oldest entry falls out of window = oldest_score + window_size
 			-- Retry after = (oldest_score + window_size) - now
 			local available_at = oldest_score + window_size_ns
