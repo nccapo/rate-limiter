@@ -127,7 +127,31 @@ limiter, _ := rrl.NewRateLimiter(
 )
 ```
 
-### 📋 Available Options
+### 6. Sliding Window Algorithm (Strict) 🪟
+
+If you need a strict limit (e.g., "Max 100 requests" in "Last 60 seconds") without the "bursts" allowed by the Token Bucket algorithm, use the **Sliding Window** store.
+
+*   **Logic**: Uses Redis Sorted Sets (`ZSET`) to track individual request timestamps.
+*   **Precision**: Extremely precise but uses more Redis memory (stores one entry per request).
+*   **Window Size**: Calculated as `MaxTokens * RefillInterval`.
+    *   Example: `MaxTokens(100)` and `RefillInterval(1s)` -> Window = 100 seconds.
+    *   Example: `MaxTokens(10)`, `RefillInterval(1m)` -> Window = 10 minutes.
+
+```go
+// 1. Create Sliding Window Store
+store := rrl.NewRedisSlidingWindowStore(rdb, true)
+
+// 2. Create Limiter
+// Limit: 5 requests. Window: 5 seconds.
+// How? MaxTokens=5. RefillInterval=1s.
+limiter, _ := rrl.NewRateLimiter(
+    rrl.WithMaxTokens(5),
+    rrl.WithRefillInterval(time.Second),
+    rrl.WithStore(store), 
+)
+```
+
+## 🤝 Contributing
 
 | Option | Description | Default |
 |--------|-------------|---------|
