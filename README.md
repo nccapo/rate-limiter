@@ -104,12 +104,27 @@ limiter, _ := rrl.NewRateLimiter(
 )
 ```
 
-### 4. Unlimited (Testing)
+### 5. Multi-Level (Tiered) Rate Limiting 🚀
 
-For tests where you want to disable blocking completely:
+For high-traffic distributed applications, checking Redis for *every* request can be expensive. Use a **Tiered Store** to buffer requests in-memory first. 
+
+*   **Logic**: Check local MemoryStore (Primary) -> If allowed, check Redis (Secondary).
+*   **Drift**: Local store might be slightly ahead of Redis, effectively providing a "circuit breaker" for your Redis instance.
+*   **Benefit**: If a specific service instance is flooded, it blocks locally, saving network trips to Redis for other services.
 
 ```go
-limiter := rrl.NewUnlimited()
+// 1. Create Stores
+localStore := rrl.NewMemoryStore()
+redisStore := rrl.NewRedisStore(rdb, true)
+
+// 2. Chain them
+tieredStore := rrl.NewTieredStore(localStore, redisStore)
+
+// 3. Create Limiter
+limiter, _ := rrl.NewRateLimiter(
+    rrl.WithRate(100),
+    rrl.WithStore(tieredStore), // Uses Hybrid logic
+)
 ```
 
 ### 📋 Available Options
