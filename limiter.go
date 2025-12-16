@@ -20,11 +20,8 @@ type RateLimiter struct {
 	// represents the cost of a request (how many tokens it consumes)
 	Rate int64
 
-	// represents the max tokens capacity that the bucket can hold
+	// MaxTokens represents the max tokens capacity that the bucket can hold
 	MaxTokens int64
-
-	// CurrentToken tokens currently present in the bucket at any time (local cache for headers)
-	CurrentToken int64
 
 	// RefillInterval is the duration to refill one token
 	RefillInterval time.Duration
@@ -148,31 +145,49 @@ func NewUnlimited() *RateLimiter {
 	}
 }
 
-// IsRequestAllowed checks if the request is allowed for the given key.
-func (rl *RateLimiter) IsRequestAllowed(key string) bool {
+// RateLimitResult holds the result of a rate limit check
+type RateLimitResult struct {
+	Allowed    bool
+	Remaining  int64
+	RetryAfter time.Duration
+}
+
+// Allow checks if the request is allowed for the given key and returns detailed info.
+func (rl *RateLimiter) Allow(ctx context.Context, key string) (*RateLimitResult, error) {
 	start := time.Now()
 	if rl.Store == nil {
 		rl.logger.Printf("Store is not initialized")
-		return false
+		return nil, errors.New("store is not initialized")
 	}
 
 	// Delegate to the Store
-	allowed, remaining, _, err := rl.Store.Allow(context.Background(), key, rl.Rate, rl.MaxTokens, rl.RefillInterval)
+	allowed, remaining, retryAfter, err := rl.Store.Allow(ctx, key, rl.Rate, rl.MaxTokens, rl.RefillInterval)
 	duration := time.Since(start)
 
 	if rl.metrics != nil {
-		rl.metrics.Record(context.Background(), key, allowed, duration, err)
+		rl.metrics.Record(ctx, key, allowed, duration, err)
 	}
 
 	if err != nil {
 		rl.logger.Printf("Rate limit storage error: %v", err)
-		return false // Fail safe
+		return nil, err
 	}
 
-	// Update local state for headers (best effort)
-	rl.CurrentToken = remaining
+	return &RateLimitResult{
+		Allowed:    allowed,
+		Remaining:  remaining,
+		RetryAfter: retryAfter,
+	}, nil
+}
 
-	return allowed
+// IsRequestAllowed checks if the request is allowed for the given key.
+// Deprecated: Use Allow() instead for thread safety and detailed results.
+func (rl *RateLimiter) IsRequestAllowed(key string) bool {
+	res, err := rl.Allow(context.Background(), key)
+	if err != nil {
+		return false
+	}
+	return res.Allowed
 }
 
 // Wait blocks until the request is allowed or the context is cancelled.

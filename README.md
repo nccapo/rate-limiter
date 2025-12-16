@@ -21,6 +21,14 @@ A robust, thread-safe, and distributed rate limiter for Go, designed for high-th
     *   Standard `net/http` middleware included.
     *   Specialized `Gin` middleware available in a sub-package.
 *   **🧠 Memory Safe**: Automatic TTL management for Redis keys prevents zombie data and memory leaks.
+*   **🆕 Thread-Safe**: Fixed critical race conditions in v0.7.4. Default `RateLimiter` is now fully atomic for concurrent use.
+
+## 🆕 What's New in v0.7.5
+
+*   **Critical Fix**: Resolved a data race in `RateLimiter` where header generation was using shared state. Now uses a thread-safe `Allow(ctx, key)` API.
+*   **Circuit Breaker**: Fixed a concurrency flaw in the "Half-Open" state. It now correctly allows only *one* probe request at a time, preventing backend overload.
+*   **API Update**: `IsRequestAllowed(key)` is **deprecated**. Please use `Allow(ctx, key)` which returns detailed metadata (`Remaining`, `RetryAfter`).
+*   **Performance**: Identified opportunity to optimize ID generation (Roadmap).
 
 ## 📦 Installation
 
