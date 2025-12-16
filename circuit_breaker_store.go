@@ -36,6 +36,7 @@ type CircuitBreakerStore struct {
 	state       State
 	failures    int64
 	lastFailure time.Time
+	probing     bool // Ensures only one request probes in Half-Open state
 
 	// timeNow allows mocking time for tests
 	timeNow func() time.Time
@@ -61,44 +62,43 @@ func NewCircuitBreakerStore(backend Store, config CircuitBreakerConfig) *Circuit
 // Allow delegates to the backend store, implementing the Circuit Breaker logic.
 func (s *CircuitBreakerStore) Allow(ctx context.Context, key string, cost int64, maxTokens int64, refillInterval time.Duration) (bool, int64, time.Duration, error) {
 	s.mu.Lock()
-	state := s.state
 
-	// Check if we need to switch from Open to Half-Open
-	if state == StateOpen {
+	// Check timeout to switch Open -> HalfOpen
+	if s.state == StateOpen {
 		if s.timeNow().Sub(s.lastFailure) > s.config.Timeout {
-			state = StateHalfOpen
 			s.state = StateHalfOpen
+		}
+	}
+
+	state := s.state
+	shouldProbe := false
+
+	if state == StateHalfOpen {
+		if !s.probing {
+			s.probing = true
+			shouldProbe = true
 		}
 	}
 	s.mu.Unlock()
 
-	// Logic based on state
-	switch state {
-	case StateOpen:
-		// Fail Fast
-		if s.config.FallbackAllow {
-			return true, maxTokens, 0, nil // Degraded mode: Allow everything (risky?) or just bypass?
-			// Usually rate limiter fallback -> Allow Open (= No Limit) or Block (= Total Outage).
-			// Let's assume user wants to 'Fail Open' (Allow) to keep service running, OR 'Fail Closed' (Block) to protect downstream.
-			// Configurable.
-		}
-		// Return error or explicit "blocked by circuit breaker"
-		return false, 0, s.config.Timeout, errors.New("circuit breaker open")
+	// 1. If we are the chosen prober (Half-Open)
+	if shouldProbe {
+		return s.attemptProbe(ctx, key, cost, maxTokens, refillInterval)
+	}
 
-	case StateHalfOpen:
-		// Attempt one request (Probe)
-		// We could use a lock to ensure only 1 probe, but simple optimization is: just let it pass.
-		// If it succeeds, Close. If fail, Re-Open.
-		return s.attemptRequest(ctx, key, cost, maxTokens, refillInterval)
-
-	case StateClosed:
-		// Normal operation
+	// 2. Closed State -> Normal operation
+	if state == StateClosed {
 		return s.attemptRequest(ctx, key, cost, maxTokens, refillInterval)
 	}
 
-	return false, 0, 0, nil
+	// 3. Open or Half-Open (but not probing) -> Fail Fast
+	if s.config.FallbackAllow {
+		return true, maxTokens, 0, nil
+	}
+	return false, 0, s.config.Timeout, errors.New("circuit breaker open")
 }
 
+// attemptRequest is for StateClosed (Normal)
 func (s *CircuitBreakerStore) attemptRequest(ctx context.Context, key string, cost int64, maxTokens int64, refillInterval time.Duration) (bool, int64, time.Duration, error) {
 	allowed, remaining, retryAfter, err := s.backend.Allow(ctx, key, cost, maxTokens, refillInterval)
 
@@ -106,20 +106,46 @@ func (s *CircuitBreakerStore) attemptRequest(ctx context.Context, key string, co
 	defer s.mu.Unlock()
 
 	if err != nil {
-		s.failures++
-		s.lastFailure = s.timeNow()
-
-		if s.state == StateHalfOpen || s.failures >= s.config.Threshold {
-			s.state = StateOpen
-		}
+		s.recordFailure()
 		return allowed, remaining, retryAfter, err
 	}
 
-	// Success! Reset.
-	if s.state == StateHalfOpen || s.failures > 0 {
-		s.failures = 0
-		s.state = StateClosed
+	// Success
+	s.reset()
+	return allowed, remaining, retryAfter, nil
+}
+
+// attemptProbe is for StateHalfOpen
+func (s *CircuitBreakerStore) attemptProbe(ctx context.Context, key string, cost int64, maxTokens int64, refillInterval time.Duration) (bool, int64, time.Duration, error) {
+	allowed, remaining, retryAfter, err := s.backend.Allow(ctx, key, cost, maxTokens, refillInterval)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.probing = false // Probe finished
+
+	if err != nil {
+		// Probe failed -> Re-Open
+		s.state = StateOpen
+		s.lastFailure = s.timeNow() // Reset timeout
+		return allowed, remaining, retryAfter, err
 	}
 
+	// Probe success -> Close
+	s.state = StateClosed
+	s.failures = 0
 	return allowed, remaining, retryAfter, nil
+}
+
+func (s *CircuitBreakerStore) recordFailure() {
+	s.failures++
+	s.lastFailure = s.timeNow()
+	if s.failures >= s.config.Threshold {
+		s.state = StateOpen
+	}
+}
+
+func (s *CircuitBreakerStore) reset() {
+	s.failures = 0
+	s.state = StateClosed
 }
