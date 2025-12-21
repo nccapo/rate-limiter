@@ -57,17 +57,30 @@ var luaSlidingWindow = redis.NewScript(`
 		if remaining < 0 then remaining = 0 end
 
 		-- Calculate retry_after.
-		-- We need to wait until the Oldest timestamp expires.
-		-- Fetch the oldest entry (smallest score).
-		local oldest_entries = redis.call("ZRANGE", key, 0, 0, "WITHSCORES")
-		if #oldest_entries > 0 then
-			-- Redis returns array [member, score]. Go-redis Slice/Map depends on version/flags.
-			-- If passing "WITHSCORES", response is usually flat array.
+		-- We need to wait until enough tokens expire to fit 'cost'.
+		-- Currently used tokens = current_count
+		-- We need (current_count + cost) <= limit to be false currently.
+		-- To allow 'cost', we need the new count to be <= limit.
+		-- So we need to remove 'needed' existing tokens.
+		-- new_count = (current_count - needed) + cost <= limit
+		-- => current_count - needed <= limit - cost
+		-- => needed >= current_count + cost - limit
+		
+		local needed = current_count + cost - limit
+		
+		-- We need to find the timestamp of the 'needed'-th oldest entry.
+		-- Because removing 'needed' oldest entries will free up enough space.
+		-- ZRANGE is 0-based. The 1st oldest is index 0. The 'needed'-th oldest is index (needed - 1).
+		
+		local index = needed - 1
+		local entries = redis.call("ZRANGE", key, index, index, "WITHSCORES")
+		
+		if #entries > 0 then
+			-- Entry found.
 			-- entry 1: member, entry 2: score.
-			local oldest_score = tonumber(oldest_entries[2]) 
+			local oldest_score = tonumber(entries[2])
 			
-			-- Time when this oldest entry falls out of window = oldest_score + window_size
-			-- Retry after = (oldest_score + window_size) - now
+			-- Time when this entry falls out of window
 			local available_at = oldest_score + window_size_ns
 			if available_at > now_ns then
 				retry_after_ns = available_at - now_ns

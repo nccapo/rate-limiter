@@ -78,3 +78,54 @@ func TestRedisSlidingWindowStore(t *testing.T) {
 	// We sent 1 new one. Count is 1. Remaining should be 1.
 	assert.Equal(t, int64(1), remaining)
 }
+
+func TestRedisSlidingWindowStore_RetryAfter_CostGreaterThanOne(t *testing.T) {
+	client, mr := setupRedisClient(t)
+	defer mr.Close()
+
+	store := NewRedisSlidingWindowStore(client, false)
+
+	// Config: 10 requests per 10 seconds.
+	// Limit = 10.
+	// Refill = 1s.
+	// Window = 10s.
+	limit := int64(10)
+	refill := 1 * time.Second
+
+	ctx := context.Background()
+	key := "test-retry-cost"
+
+	start := time.Now()
+	store.timeNow = func() time.Time { return start }
+
+	// 1. Fill the window with 10 requests (cost 1 each)
+	for i := 0; i < 10; i++ {
+		store.timeNow = func() time.Time { return start.Add(time.Duration(i) * time.Second) }
+		allowed, _, _, _ := store.Allow(ctx, key, 1, limit, refill)
+		assert.True(t, allowed, "Request %d should be allowed", i)
+	}
+
+	// Now at T=9. Window contains starts [0, 1, ..., 9]. Expirations: [10, 11, ..., 19].
+	// Limit=10. Count=10.
+
+	// Try allow with Cost=3 at T=9.5.
+	store.timeNow = func() time.Time { return start.Add(9500 * time.Millisecond) }
+	allowed, _, retryAfter, _ := store.Allow(ctx, key, 3, limit, refill)
+	assert.False(t, allowed)
+
+	// Expectation: The CORRECT behavior would be to wait for 3rd oldest slot (T=2) to expire.
+	// 3rd oldest expires at T=12.
+	// Current time T=9.5.
+	// Expected wait = 12 - 9.5 = 2.5s.
+
+	t.Logf("RetryAfter: %v", retryAfter)
+
+	expectedWait := 2500 * time.Millisecond
+	assert.InDelta(t, expectedWait.Nanoseconds(), retryAfter.Nanoseconds(), float64(100*time.Millisecond))
+
+	// Verify that waiting THIS time IS enough (just barely)
+	store.timeNow = func() time.Time { return start.Add(9500 * time.Millisecond).Add(retryAfter).Add(10 * time.Millisecond) }
+
+	allowed, _, _, _ = store.Allow(ctx, key, 3, limit, refill)
+	assert.True(t, allowed, "Should be allowed after waiting the correct retryAfter")
+}
