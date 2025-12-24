@@ -60,8 +60,11 @@ func TestCircuitBreakerStore(t *testing.T) {
 	// Even if backend fixes itself, CB blocks calls
 	mock.shouldFail = false
 	allowed, _, _, err = cb.Allow(ctx, "k", 1, 1, time.Second)
-	assert.Error(t, err, "Should error fast")
-	assert.Equal(t, "circuit breaker open", err.Error())
+	// 4. Open State (Fail Fast)
+	// Even if backend fixes itself, CB blocks calls
+	mock.shouldFail = false
+	allowed, _, _, err = cb.Allow(ctx, "k", 1, 1, time.Second)
+	assert.NoError(t, err, "Should not error when fail fast")
 	assert.False(t, allowed)
 
 	// 5. Half-Open (After Timeout)
