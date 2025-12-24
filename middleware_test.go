@@ -1,6 +1,7 @@
 package rrl
 
 import (
+	"context"
 	"io"
 	"log"
 	"net/http"
@@ -190,4 +191,50 @@ func TestCustomStatusHandler(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, rec2.Code)
 	assert.Equal(t, "custom error message", rec2.Body.String())
 	assert.Equal(t, "rate-limited", rec2.Header().Get("Custom-Header"))
+}
+
+// MiddlewareFailStore for testing circuit breaker in middleware
+type MiddlewareFailStore struct {
+	shouldFail bool
+}
+
+func (f *MiddlewareFailStore) Allow(ctx context.Context, key string, cost int64, maxTokens int64, refillInterval time.Duration) (bool, int64, time.Duration, error) {
+	if f.shouldFail {
+		return false, 0, 0, assert.AnError
+	}
+	return true, 10, 0, nil
+}
+
+func TestMiddlewareWithCircuitBreaker(t *testing.T) {
+	// 1. Setup Circuit Breaker
+	backend := &MiddlewareFailStore{shouldFail: true}
+	cbStore := NewCircuitBreakerStore(backend, CircuitBreakerConfig{
+		Threshold: 1, // Trip immediately
+		Timeout:   time.Minute,
+	})
+
+	limiter, _ := NewRateLimiter(
+		WithStore(cbStore),
+	)
+
+	// 2. Trip it (Direct call)
+	// First call fails matching Threshold=1
+	cbStore.Allow(context.Background(), "test", 1, 1, time.Second)
+
+	// 3. Setup Middleware
+	middleware := HTTPRateLimiter(HTTPRateLimiterConfig{
+		Limiter: limiter,
+	})
+	handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	// 4. Hit it via Middleware
+	// The Circuit Breaker is now OPEN. It should return allowed=false, err=nil.
+	// Middleware should see this as rate limit exceeded (429), NOT 500.
+	req := httptest.NewRequest("GET", "/test", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusTooManyRequests, rec.Code, "Expected 429 when Circuit Breaker is open")
 }

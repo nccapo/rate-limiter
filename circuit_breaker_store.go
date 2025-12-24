@@ -2,7 +2,6 @@ package rrl
 
 import (
 	"context"
-	"errors"
 	"sync"
 	"time"
 )
@@ -95,7 +94,9 @@ func (s *CircuitBreakerStore) Allow(ctx context.Context, key string, cost int64,
 	if s.config.FallbackAllow {
 		return true, maxTokens, 0, nil
 	}
-	return false, 0, s.config.Timeout, errors.New("circuit breaker open")
+	// Do NOT return error, just return allowed=false with RetryAfter = timeout
+	// This ensures Wait() can backoff and Middleware returns 429 instead of 500.
+	return false, 0, s.config.Timeout, nil
 }
 
 // attemptRequest is for StateClosed (Normal)
@@ -117,12 +118,17 @@ func (s *CircuitBreakerStore) attemptRequest(ctx context.Context, key string, co
 
 // attemptProbe is for StateHalfOpen
 func (s *CircuitBreakerStore) attemptProbe(ctx context.Context, key string, cost int64, maxTokens int64, refillInterval time.Duration) (bool, int64, time.Duration, error) {
+	// Ensure we reset probing state even if panic occurs
+	defer func() {
+		s.mu.Lock()
+		s.probing = false
+		s.mu.Unlock()
+	}()
+
 	allowed, remaining, retryAfter, err := s.backend.Allow(ctx, key, cost, maxTokens, refillInterval)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	s.probing = false // Probe finished
 
 	if err != nil {
 		// Probe failed -> Re-Open
