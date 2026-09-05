@@ -3,7 +3,7 @@
 A robust, thread-safe, and distributed rate limiter for Go, designed for high-throughput applications. It implements the **Token Bucket** algorithm and supports both **Redis** (for distributed systems) and **In-Memory** (for single-instance apps) backends.
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
-![Go Version](https://img.shields.io/badge/go-%3E%3D1.20-blue)
+![Go Version](https://img.shields.io/badge/go-%3E%3D1.27-blue)
 [![Go Report Card](https://goreportcard.com/badge/github.com/nccapo/rate-limiter)](https://goreportcard.com/report/github.com/nccapo/rate-limiter)
 [![GoDoc](https://godoc.org/github.com/nccapo/rate-limiter?status.svg)](https://godoc.org/github.com/nccapo/rate-limiter)
 [![Build Status](https://github.com/nccapo/rate-limiter/actions/workflows/go.yml/badge.svg)](https://github.com/nccapo/rate-limiter/actions)
@@ -14,14 +14,21 @@ A robust, thread-safe, and distributed rate limiter for Go, designed for high-th
 *   **🛡️ Atomic Operations**: Leverages Redis Lua scripts to ensure strict rate limiting without race conditions in distributed environments.
 *   **💾 Pluggable Storage**:
     *   **Redis**: First-class support for `go-redis/v9`. Ideal for microservices and load-balanced APIs.
-    *   **In-Memory**: fast, thread-safe local storage. Perfect for unit tests or standalone binaries.
+    *   **In-Memory**: fast, thread-safe local storage that reclaims idle buckets, so memory stays bounded no matter how many distinct clients you see. Perfect for unit tests or standalone binaries.
 *   **⚙️ Functional Options**: Clean, idiomatic Go API for configuration (`WithRate`, `WithStore`, etc.).
 *   **⏮️ Blocking Support**: `Wait(ctx, key)` method for client-side throttling (like `uber-go/ratelimit`'s `Take`).
 *   **🔌 Middleware Ready**:
     *   Standard `net/http` middleware included.
     *   Specialized `Gin` middleware available in a sub-package.
-*   **🧠 Memory Safe**: Automatic TTL management for Redis keys prevents zombie data and memory leaks.
+*   **🧠 Memory Safe**: Automatic TTL management for Redis keys, and automatic eviction of idle buckets in `MemoryStore`, prevent zombie data and unbounded growth.
 *   **🆕 Thread-Safe**: Fixed critical race conditions in v0.7.4. Default `RateLimiter` is now fully atomic for concurrent use.
+
+## 🆕 What's New in v0.8.0
+
+*   **Memory Leak Fix**: `MemoryStore` kept one bucket per distinct key (typically one per client IP) for the lifetime of the process — 500k unique keys retained ~53 MB that was never released. Buckets that have refilled to capacity are now reclaimed, which is behaviour-preserving because a full bucket and a never-seen key start the next request identically. Retention is now bounded by the sweep window instead of by the number of keys ever seen.
+*   **New Options**: `WithMemorySweepInterval(d)` and `WithMemoryMaxKeys(n)` tune reclamation; `MemoryStore.Len()` exposes the current bucket count.
+*   **Go 1.27**: The module now requires Go 1.27 and uses the new standard-library [`uuid`](https://pkg.go.dev/uuid) package.
+*   **ID Generation** (the v0.7.5 roadmap item): the sliding-window store's hand-rolled random ID is replaced by `uuid.NewV7()`. Version 7 UUIDs are time-ordered, so ZSET members sort with their scores, and `NewV7` is monotonic within a process. It also removes a fallback path that returned `time.Now().String()` when the random reader failed — a value that was neither unique nor collision-safe.
 
 ## 🆕 What's New in v0.7.5
 
@@ -31,6 +38,8 @@ A robust, thread-safe, and distributed rate limiter for Go, designed for high-th
 *   **Performance**: Identified opportunity to optimize ID generation (Roadmap).
 
 ## 📦 Installation
+
+Requires **Go 1.27 or newer** (the sliding-window store uses the standard-library `uuid` package introduced in Go 1.27).
 
 ```bash
 go get github.com/nccapo/rate-limiter
@@ -122,7 +131,7 @@ For high-traffic distributed applications, checking Redis for *every* request ca
 
 ```go
 // 1. Create Stores
-localStore := rrl.NewMemoryStore()
+localStore := rrl.NewMemoryStore() // idle buckets are reclaimed automatically
 redisStore := rrl.NewRedisStore(rdb, true)
 
 // 2. Chain them
@@ -169,6 +178,15 @@ limiter, _ := rrl.NewRateLimiter(
 | `WithRefillInterval(duration)` | The time it takes to refill **one** token. | `1s` |
 | `WithStore(Store)` | The storage backend (`RedisStore` or `MemoryStore`). | **Required** |
 | `WithLogger(*log.Logger)` | Custom logger for debug/error events. | `os.Stderr` |
+
+### `MemoryStore` Options
+
+`MemoryStore` reclaims a bucket once it has refilled to capacity, since at that point it is indistinguishable from a key the store has never seen. Sweeps run inline on `Allow`, so there is no background goroutine to shut down and nothing to `Close`.
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `WithMemorySweepInterval(duration)` | Minimum delay between eviction sweeps. `<= 0` disables interval-based sweeping. | `1m` |
+| `WithMemoryMaxKeys(int)` | Sweep as soon as the store holds more than `n` keys, without waiting for the interval. Soft cap: buckets still holding depleted state are never dropped, because resetting them would hand those clients a full bucket. | `0` (off) |
 
 ---
 
