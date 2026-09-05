@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        go-version: [ '1.23', '1.26' ]
+        go-version: [ '1.27', 'stable' ]
     services:
       redis:
         image: redis:latest
@@ -26,10 +26,16 @@ jobs:
         with:
           go-version: ${{ matrix.go-version }}
 
+      # Pin the job to the toolchain it selected. Without this, a version older
+      # than the go directive in go.mod silently downloads a newer toolchain
+      # and the matrix entry tests nothing.
+      - name: Pin toolchain
+        run: echo "GOTOOLCHAIN=local" >> $GITHUB_ENV
+
       - name: Install dependencies
         run: go get .
       - name: Test with Go
-        run: go test
+        run: go test ./...
       - name: Upload Go test results
         uses: actions/upload-artifact@v4
         with:

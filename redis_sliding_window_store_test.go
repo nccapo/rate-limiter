@@ -129,3 +129,66 @@ func TestRedisSlidingWindowStore_RetryAfter_CostGreaterThanOne(t *testing.T) {
 	allowed, _, _, _ = store.Allow(ctx, key, 3, limit, refill)
 	assert.True(t, allowed, "Should be allowed after waiting the correct retryAfter")
 }
+
+// TestRedisSlidingWindowStore_UniqueMembersAtSameInstant pins the clock so
+// every request lands on the same sorted-set score. Each request must still
+// occupy its own ZSET member, which is what the per-request UUID guarantees:
+// if two requests ever produced the same id, ZADD would overwrite instead of
+// insert and the limiter would silently admit more than the limit.
+func TestRedisSlidingWindowStore_UniqueMembersAtSameInstant(t *testing.T) {
+	client, mr := setupRedisClient(t)
+	defer mr.Close()
+
+	store := NewRedisSlidingWindowStore(client, false)
+
+	frozen := time.Now()
+	store.timeNow = func() time.Time { return frozen }
+
+	ctx := context.Background()
+	key := "same-instant"
+	limit := int64(50)
+	refill := 20 * time.Millisecond
+
+	for i := int64(0); i < limit; i++ {
+		allowed, remaining, _, err := store.Allow(ctx, key, 1, limit, refill)
+		assert.NoError(t, err)
+		assert.True(t, allowed, "request %d should be admitted", i)
+		assert.Equal(t, limit-i-1, remaining)
+	}
+
+	allowed, _, retryAfter, err := store.Allow(ctx, key, 1, limit, refill)
+	assert.NoError(t, err)
+	assert.False(t, allowed, "the limit must hold even when every request shares a timestamp")
+	assert.Positive(t, retryAfter)
+}
+
+// TestRedisSlidingWindowStore_UniqueMembersWithCost covers the same property
+// for a multi-token request, where one call adds several members at once.
+func TestRedisSlidingWindowStore_UniqueMembersWithCost(t *testing.T) {
+	client, mr := setupRedisClient(t)
+	defer mr.Close()
+
+	store := NewRedisSlidingWindowStore(client, false)
+
+	frozen := time.Now()
+	store.timeNow = func() time.Time { return frozen }
+
+	ctx := context.Background()
+	key := "same-instant-cost"
+	limit := int64(10)
+	refill := 100 * time.Millisecond
+
+	allowed, remaining, _, err := store.Allow(ctx, key, 4, limit, refill)
+	assert.NoError(t, err)
+	assert.True(t, allowed)
+	assert.Equal(t, int64(6), remaining)
+
+	allowed, remaining, _, err = store.Allow(ctx, key, 6, limit, refill)
+	assert.NoError(t, err)
+	assert.True(t, allowed)
+	assert.Equal(t, int64(0), remaining, "all 10 members must be distinct entries")
+
+	allowed, _, _, err = store.Allow(ctx, key, 1, limit, refill)
+	assert.NoError(t, err)
+	assert.False(t, allowed)
+}

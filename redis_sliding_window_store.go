@@ -2,10 +2,8 @@ package rrl
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
-	"io"
 	"time"
+	"uuid"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -130,9 +128,12 @@ func (s *RedisSlidingWindowStore) Allow(ctx context.Context, key string, cost in
 		ttlSeconds = 60
 	}
 
-	// Generate Unique Request ID (UUID-like)
-	// We use 12 bytes of random hex (should be enough collision resistance for this purpose)
-	reqID := generateRandomID()
+	// Generate a unique request ID for the ZSET members added below.
+	// A version 7 UUID (RFC 9562) carries a millisecond timestamp in its high
+	// bits, so members sort in the same order as the scores they are stored
+	// under, and NewV7 is monotonic within a process - two calls can never
+	// return the same value even inside a single clock tick.
+	reqID := uuid.NewV7().String()
 
 	result, err := luaSlidingWindow.Run(ctx, s.client,
 		[]string{sEnc},
@@ -153,13 +154,4 @@ func (s *RedisSlidingWindowStore) Allow(ctx context.Context, key string, cost in
 	retryAfterNs := result[2].(int64)
 
 	return allowed, remaining, time.Duration(retryAfterNs), nil
-}
-
-func generateRandomID() string {
-	b := make([]byte, 12)
-	if _, err := io.ReadFull(rand.Reader, b); err != nil {
-		// Fallback if reader fails (unlikely)
-		return time.Now().String()
-	}
-	return hex.EncodeToString(b)
 }

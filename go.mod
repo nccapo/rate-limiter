@@ -1,6 +1,6 @@
 module github.com/nccapo/rate-limiter
 
-go 1.26
+go 1.27
 
 require (
 	github.com/alicebob/miniredis/v2 v2.34.0
